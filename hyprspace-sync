@@ -1,0 +1,122 @@
+#!/bin/bash
+
+
+datafn=$(mktemp)
+function cleanup {
+    rm -f "${datafn}"
+}
+trap cleanup EXIT
+
+
+function parse_yaml {
+   local prefix=$2
+   local s='[[:space:]]*' w='[a-zA-Z0-9_]*' fs=$(echo @|tr @ '\034')
+   sed -ne "s|^\($s\):|\1|" \
+        -e "s|^\($s\)\($w\)$s:$s[\"']\(.*\)[\"']$s\$|\1$fs\2$fs\3|p" \
+        -e "s|^\($s\)\($w\)$s:$s\(.*\)$s\$|\1$fs\2$fs\3|p"  $1 |
+   awk -F${fs} '{
+      indent = length($1)/2;
+      vname[indent] = $2;
+      for (i in vname) {if (i > indent) {delete vname[i]}}
+      if (length($3) > 0) {
+         vn=""; for (i=0; i<indent; i++) {vn=(vn)(vname[i])("_")}
+         printf("%s%s%s=\"%s\"\n", "'${prefix}'",vn, $2, $3);
+      }
+   }'
+}
+
+
+function set_hyprspace_yaml {
+    datafn=$1
+    hyprfn=$2
+
+    res=""
+    for peer in $(sed -n 's/peers_\(.*\)_ip=.*/\1/p' "${datafn}")
+    do
+        [ ! -z "${res}" ] && res+="\n"
+        ip=$(sed -ne "s|peers_${peer}_ip=\"\(.*\)\"|\1|p" "${datafn}")
+        id=$(sed -ne "s|peers_${peer}_id=\"\(.*\)\"|\1|p" "${datafn}")
+        res+="\ \ ${ip}:\n    id: ${id}"
+    done
+
+    ip=$(sed -n "s|.*address: \(.*\)/\(.*\).*|\1|p" "${hyprfn}")
+    host=$(sed -n "s|peers_\(.*\)_ip=\"${ip}\"|\1|p" "${datafn}")
+    port=$(sed -ne "s|peers_${host}_port=\"\(.*\)\"|\1|p" "${datafn}")
+    discoverkey=$(sed -ne "s|peers_discover_key=\"\(.*\)\"|\1|p" "${datafn}")
+
+    sed -i -e "s/peers: {}/peers:/" \
+        -e "/^peers:/,\${//!d};/^peers:/a${res}" \
+        -e "s|listen_port:.*|listen_port: ${port}|" \
+        -e "s|discover_key:.*|discover_key: ${discoverkey}|" "${hyprfn}"
+}
+
+
+function set_hosts {
+    datafn=$1
+    suffix=$2
+    hosts=$3
+
+    res=""
+    for peer in $(sed -n 's/peers_\(.*\)_ip=.*/\1/p' "${datafn}")
+    do
+        [ ! -z "${res}" ] && res+="\n"
+        ip=$(sed -ne "s|peers_${peer}_ip=\"\(.*\)\"|\1|p" "${datafn}")
+        res+="${ip} ${peer}.${suffix}.hs"
+    done
+
+    bgn="#DO NOT EDIT hyprspace ${suffix} BEGIN"
+    end="#DO NOT EDIT hyprspace ${suffix} END"
+    if ! grep -qz "${bgn}.*${end}" "${hosts}"
+    then
+        echo -e "\n${bgn}\n${res}\n${end}" >> "${hosts}"
+        return
+    fi
+
+    sed -i "/${bgn}/,/${end}/{//!d};/${bgn}/a${res}" "${hosts}"
+}
+
+
+cd "$(dirname $(realpath "$0"))"
+
+if [ ! -f "./peers.yaml" ]
+then
+    cat <<EOF
+$(pwd)/peers.yaml is missing!
+Create one with the format:
+
+interface_name: <name corresponding to /etc/hyprspace/name.yaml>
+discover_key: <same key shared between nodes>
+node_name1:
+  ip: <ipaddress>
+  port: <port to listen>
+  id: <peer1 id>
+node_name2:
+...
+
+EOF
+    exit 1
+fi
+
+parse_yaml "./peers.yaml" peers_ > "${datafn}"
+
+hyprfn="/etc/hyprspace/"$(sed -ne "s|peers_interface_name=\"\(.*\)\"|\1|p" "${datafn}")".yaml"
+interface=$(basename "${hyprfn}")
+interface=${interface%.*}
+hostsfn="/etc/hosts"
+
+if [ ! -f "${hyprfn}" ]
+then
+    cat <<EOF
+"${hyprfn}" is missing!
+Create one using
+       hyprspace init ${interface}
+
+Set the desired ip address in ${hyprfn},
+and copy the generate id to the peers.yaml
+
+EOF
+    exit 1
+fi
+
+set_hyprspace_yaml "${datafn}" "${hyprfn}"
+set_hosts "${datafn}" "${interface}" "${hostsfn}"
